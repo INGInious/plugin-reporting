@@ -20,9 +20,13 @@ import json
 import os
 import logging
 
-from flask import send_from_directory, request
+from mongoengine.queryset import Q
+from flask import send_from_directory, request, render_template, session
+from inginious.frontend.courses import Course
 from inginious.frontend.pages.utils import INGIniousPage
 from inginious.frontend.pages.course_admin.utils import INGIniousSubmissionsAdminPage
+from inginious.frontend.models import CourseClass, UserTask, Submission
+
 
 """ A plugin that displays beautiful reporting widgets """
 
@@ -31,7 +35,7 @@ PATH_TO_PLUGIN = os.path.abspath(os.path.dirname(__file__))
 
 def add_admin_menu(course):  # pylint: disable=unused-argument
     """ Add a menu for jplag analyze in the administration """
-    return 'reporting', '<i class="fa fa-bar-chart"></i>&nbsp; Reporting'
+    return 'reportingpage', '<i class="fa fa-bar-chart"></i>&nbsp; Reporting'
 
 
 class StaticMockPage(INGIniousPage):
@@ -42,11 +46,11 @@ class StaticMockPage(INGIniousPage):
         return self.GET(path)
 
 
-def init(plugin_manager, _, _2, config):
+def init(plugin_manager, _, config):
     """ Init the plugin """
-    netv4 = config.get('networkv4')
-    netv6 = config.get('networkv6')
-    netname = config.get('networkname')
+    netv4 = config.get('networkv4', '192.168.0.0/24')
+    netv6 = config.get('networkv6', 'fd00::/64')
+    netname = config.get('networkname', 'Local network')
 
     def _clean_data(data):
         cleaned = data.replace("&#39;", "")
@@ -61,7 +65,7 @@ def init(plugin_manager, _, _2, config):
 
         def GET_AUTH(self, courseid):  # pylint: disable=arguments-differ
             """ GET request """
-            course = self.course_factory.get_course(courseid)
+            course = Course.get(courseid)
 
             user_input = request.form.copy()
             user_input["users"] = request.form.getlist("users")
@@ -75,7 +79,7 @@ def init(plugin_manager, _, _2, config):
         def POST_AUTH(self, courseid):
             """POST REQUEST - Allows display of the diagram"""
             self._logger = logging.getLogger("inginious.webapp.plugins.reporting")
-            course = self.course_factory.get_course(courseid)
+            course = Course.get(courseid)
             tasks = course.get_tasks()
 
             x = request.form.copy()
@@ -86,8 +90,8 @@ def init(plugin_manager, _, _2, config):
             task_ids = ",".join(x["tasks"])
             task_titles = {}
             for task_id in tasks:
-                task_titles[task_id] = tasks[task_id].get_name(self.user_manager.session_language())
-            return self.template_helper.render("reporting_chart.html", template_folder=PATH_TO_PLUGIN + "/templates/",
+                task_titles[task_id] = tasks[task_id].get_name(session.language)
+            return render_template("reporting/reporting_chart.html",
                                                course=course, stud_ids=student_ids, task_ids=task_ids,
                                                task_titles=task_titles, netname=netname)
 
@@ -98,7 +102,7 @@ def init(plugin_manager, _, _2, config):
             users, tutored_users, audiences, tutored_audiences, tasks, limit = self.get_course_params(course,
                                                                                                       user_input)
 
-            return self.template_helper.render("reporting_index.html", template_folder=PATH_TO_PLUGIN + "/templates/",
+            return render_template("reporting/reporting_index.html",
                                                course=course, tasks=tasks, users=users, audiences=audiences,
                                                tutored_audiences=tutored_audiences, tutored_users=tutored_users,
                                                old_params=user_input, msg=msg, error=error)
@@ -128,15 +132,13 @@ def init(plugin_manager, _, _2, config):
                 return dicgrade
 
             if student_ids == ['']:
-                student_ids = (self.database.aggregations.find_one({"courseid": courseid}, {"students": 1}))
-                student_ids = student_ids["students"]
+                course_class = CourseClass.objects(id=courseid).first()
+                student_ids = course_class.students if course_class else []
 
-            subs = list(self.database.submissions.aggregate(
+            subs = list(Submission.objects(
+                Q(taskid__in=task_ids) & Q(username__in=student_ids) & Q(courseid=courseid)
+            ).aggregate(
                 [
-                    {
-                        "$match": {"$and": [
-                            {"taskid": {"$in": task_ids}, "username": {"$in": student_ids}, "courseid": courseid}]}
-                    },
                     {
                         "$group":
                             {
@@ -160,23 +162,19 @@ def init(plugin_manager, _, _2, config):
     class Diagram2Page(INGIniousSubmissionsAdminPage):
         ### GET/POST ###
         def POST(self, courseid):
-            course = self.course_factory.get_course(courseid)
+            course = Course.get(courseid)
             self._logger = logging.getLogger("inginious.webapp.plugins.reporting")
             data = request.form
             task_ids = _clean_data(data["task_ids"])
             tasks_data = {}
             tasks_data["nstuds"] = len(self.user_manager.get_course_registered_users(course, False))
             for task_id in task_ids:
-                data = list(self.database.user_tasks.aggregate(
+                data = list(UserTask.objects(
+                    courseid=courseid,
+                    taskid= task_id,
+                    username__in=self.user_manager.get_course_registered_users(course, False)
+                ).aggregate(
                     [
-                        {
-                            "$match":
-                                {
-                                    "courseid": courseid,
-                                    "taskid": task_id,
-                                    "username": {"$in": self.user_manager.get_course_registered_users(course, False)}
-                                }
-                        },
                         {
                             "$group":
                                 {
@@ -186,7 +184,8 @@ def init(plugin_manager, _, _2, config):
                                     "succeeded": {"$sum": {"$cond": ["$succeeded", 1, 0]}}
                                 }
                         }
-                    ]))
+                    ]
+                ))
                 tasks_data[task_id] = data
             return json.dumps(tasks_data)
 
@@ -197,10 +196,8 @@ def init(plugin_manager, _, _2, config):
             total = 0
             nb_task_tried = 0
             for task in tasks:
-                submissions = self.database.submissions.find({"username": str(username),
-                                                              "taskid": task,
-                                                              "courseid": courseid})
-                ut = self.database.user_tasks.find_one({"username": username, "taskid": task, "courseid": courseid})
+                submissions = Submission.objects(username=str(username),taskid=task,courseid=courseid)
+                ut = UserTask.objects(username=username, taskid=task, courseid=courseid).first()
                 grade = ut["grade"] if ut is not None else 0
                 task_count_sub[task] = {"count": submissions.count(), "grade": grade}
                 total += grade
@@ -213,7 +210,7 @@ def init(plugin_manager, _, _2, config):
             data = request.form
             task_ids = _clean_data(data["task_ids"])
             student_ids = _clean_data(data["student_ids"])
-            course = self.course_factory.get_course(courseid)
+            course = Course.get(courseid)
             students = self.user_manager.get_course_registered_users(course, False)
             # get number of submissions per student per task
             users_submissions = {}
@@ -225,12 +222,8 @@ def init(plugin_manager, _, _2, config):
                 nb_task = len(users_submissions[student]["tasks"])
                 users_submissions[student]["total"] = int(total / nb_task)
                 users_submissions[student]["nb_task"] = nb_task_tried
-                first = list(self.database.submissions.find({"courseid": courseid, "username": student}).sort(
-                    [('submitted_on', -1)]).limit(1))
-                first = first[0] if len(first) > 0 else None
-                last = list(self.database.submissions.find({"courseid": courseid, "username": student}).sort(
-                    [('submitted_on', 1)]).limit(1))
-                last = last[0] if len(last) > 0 else None
+                first = Submission.objects(courseid=courseid, username=student).order_by('-submitted_on').first()
+                last = Submission.objects(courseid=courseid, username=student).order_by('submitted_on').first()
                 if first is not None and last is not None:
                     delta = abs((first["submitted_on"] - last["submitted_on"]))
                     users_submissions[student]["course_time"] = {"days": int(delta.days),
@@ -252,9 +245,7 @@ def init(plugin_manager, _, _2, config):
             data = request.form
             task_ids = _clean_data(data["task_ids"])
             student_ids = _clean_data(data["student_ids"])
-            submissions = list(self.database.submissions.find({"taskid": {"$in": task_ids},
-                                                               "username": {"$in": student_ids},
-                                                               "courseid": courseid}))
+            submissions = list(Submission.objects(taskid__in=task_ids,username__in=student_ids, courseid=courseid))
             sort_per_username_ip_and_q = {}
             for sub in submissions:
                 cur_date = sub["submitted_on"].strftime("%d/%m/%Y %H:%M:%S")
@@ -322,3 +313,4 @@ def init(plugin_manager, _, _2, config):
     plugin_manager.add_page("/admin/<courseid>/reporting/diag3", Diagram3Page.as_view("reportingdiag3page"))
     plugin_manager.add_page("/admin/<courseid>/reporting/diag4", Diagram4Page.as_view("reportingdiag4page"))
     plugin_manager.add_hook('course_admin_menu', add_admin_menu)
+    plugin_manager.add_template_prefix("reporting", PATH_TO_PLUGIN + "/templates")

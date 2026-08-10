@@ -7,22 +7,24 @@
 
 {% block head %}
     {{ super() }}
-    <script src="{{get_homepath()}}/static/js/libs/chart.min.js"></script>
-    <script src="{{get_homepath()}}/plugins/reporting/static/chartjs-plugin-annotation.min.js"></script>
+    <script src="{{ url_for('static', filename='/js/libs/chart.min.js') }}"></script>
+    <script src="{{ url_for('reportingstaticpage', path='/chartjs-plugin-annotation.min.js') }}"></script>
     <style>
     .highlight {background-color: yellowgreen;}
     </style>
 {% endblock %}
 
 {% block column %}
-    {{ template_helper.call('course_admin_menu',course=course,current='reporting') | safe }}
+{% with current='reportingpage' %}
+    {% include 'course_admin/menu.html' %}
+{% endwith %}
 {% endblock %}
 
 {% block navbar %}
     <nav aria-label="breadcrumb">
         <ol class="breadcrumb">
-            <li class="breadcrumb-item"><a href="{{get_homepath()}}/course/{{course.get_id()}}">{{course.get_name(user_manager.session_language())}}</a></li>
-            <li class="breadcrumb-item"><a href="{{get_homepath()}}/admin/{{course.get_id()}}" title="Administration" data-toggle="tooltip" data-placement="bottom">
+            <li class="breadcrumb-item"><a href="{{ url_for('coursepage', courseid=course.get_id()) }}">{{course.get_name(session.language)}}</a></li>
+            <li class="breadcrumb-item"><a href="{{ url_for('coursesettingspage', courseid=course.get_id()) }}" title="Administration" data-toggle="tooltip" data-placement="bottom">
                 <i class="fa fa-user-secret"></i></a></li>
             <li class="breadcrumb-item active"><a href="#"><i class="fa fa-bar-chart"></i> Reporting <span class="sr-only">(current)</span></a></li>
         </ol>
@@ -476,7 +478,7 @@
         for (var student in json_result){
             var mins = ((json_result[student]["course_time"]["days"]*60+json_result[student]["course_time"]["hours"])*60+json_result[student]["course_time"]["minutes"]);
             $('#table_body').append('<tr id="'+student+'" class="stud" data-nb_task="'+ json_result[student]["nb_task"] +'" data-minutes="'+mins+'">' +
-                '<td><a href="{{get_homepath()}}/admin/{{course.get_id()}}/student/'+student+'">'+student+'</a></td><td class="course_duration">'
+                '<td><a href="{{url_for('coursestudentinfopage', courseid=course.get_id(), username='') }}' +student+'">'+student+'</a></td><td class="course_duration">'
                                 +json_result[student]["course_time"]["days"]+'d '
                                 +json_result[student]["course_time"]["hours"].toString().padStart(2, '0')+':'
                                 +json_result[student]["course_time"]["minutes"].toString().padStart(2, '0')+':'
